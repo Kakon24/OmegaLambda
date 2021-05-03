@@ -7,7 +7,7 @@ import re
 import copy
 import logging
 import subprocess
-# import threading
+import threading
 
 from ..common.util import time_utils, conversion_utils
 from ..common.IO import config_reader
@@ -60,18 +60,19 @@ class ObservationRun:
         self.continuous_focus_toggle = True
         self.tz = observation_request_list[0].start_time.tzinfo
         self.time_start = None
+        self.plot_lock = threading.Lock()
 
         # Initializes all relevant hardware
         self.camera = Camera()
         self.telescope = Telescope()
         self.dome = Dome()
         self.focuser = Focuser()
-        self.conditions = Conditions()
+        self.conditions = Conditions(plot_lock=self.plot_lock)
         self.flatlamp = FlatLamp()
 
 
         # Initializes higher level structures - focuser, guider, and calibration
-        self.focus_procedures = FocusProcedures(self.focuser, self.camera, self.conditions)
+        self.focus_procedures = FocusProcedures(self.focuser, self.camera, self.conditions, plot_lock=self.plot_lock)
         self.calibration = Calibration(self.camera, self.flatlamp, self.image_directories)
         self.guider = Guider(self.camera, self.telescope)
         self.gui = Gui(self.focuser, self.focus_procedures, focus_toggle)
@@ -146,23 +147,26 @@ class ObservationRun:
             logging.info("Sleeping for {} minutes, then weather checks will resume to attempt "
                          "a possible re-open.".format(self.config_dict.min_reopen_time))
             time.sleep(self.config_dict.min_reopen_time * 60)
-            if self.conditions.sun:
-                sunset_time = conversion_utils.get_sunset(datetime.datetime.now(self.tz),
-                                                          self.config_dict.site_latitude,
-                                                          self.config_dict.site_longitude)
-                logging.info('The Sun has risen above the horizon...observing will stop until the Sun sets again '
-                             'at {}.'.format(sunset_time.strftime('%Y-%m-%d %H:%M:%S%z')))
-                current_time = datetime.datetime.now(self.tz)
-                while current_time < sunset_time:
-                    self.threadcheck()
-                    current_time = datetime.datetime.now(self.tz)
-                    if current_time > self.observation_request_list[-1].end_time:
-                        return False
-                    time.sleep(self.config_dict.weather_freq * 60)
-                logging.info('The Sun should now be setting again...observing will resume shortly.')
 
-            else:
-                while self.conditions.weather_alert.isSet():
+            while self.conditions.weather_alert.isSet():
+                if self.conditions.sun:
+                    cooler = True
+                    self.camera.onThread(self.camera.cooler_set, False)
+                    sunset_time = conversion_utils.get_sunset(datetime.datetime.now(self.tz),
+                                                              self.config_dict.site_latitude,
+                                                              self.config_dict.site_longitude)
+                    logging.info('The Sun has risen above the horizon...observing will stop until the Sun sets again '
+                                 'at {}.'.format(sunset_time.strftime('%Y-%m-%d %H:%M:%S%z')))
+                    current_time = datetime.datetime.now(self.tz)
+                    while current_time < sunset_time:
+                        self.threadcheck()
+                        current_time = datetime.datetime.now(self.tz)
+                        if current_time > self.observation_request_list[-1].end_time:
+                            return False
+                        time.sleep((self.config_dict.weather_freq + 1) * 60)
+                    logging.info('The Sun should now be setting again...observing will resume shortly.')
+
+                else:
                     self.threadcheck()
                     logging.info("Still waiting for good conditions to reopen.")
                     current_time = datetime.datetime.now(self.tz)
@@ -205,7 +209,7 @@ class ObservationRun:
 
         """
         # Give initial time lag to allow first weather check to complete
-        time.sleep(5)
+        time.sleep(10)
         initial_check = self.everything_ok()
         if cooler:
             self.camera.onThread(self.camera.cooler_set, True)

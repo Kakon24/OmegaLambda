@@ -12,6 +12,8 @@ import logging
 import datetime
 import time
 import numpy as np
+from matplotlib import pyplot as plt
+from matplotlib import colors as mplc
 
 from PIL import Image
 
@@ -21,10 +23,15 @@ from ..common.IO import config_reader
 
 class Conditions(threading.Thread):
 
-    def __init__(self):
+    def __init__(self, plot_lock=None):
         """
         Subclassed from threading.Thread.  Conditions periodically checks the humidity, wind, sun position, clouds, and
         rain while observing.
+
+        Parameters
+        ----------
+        plot_lock : threading.Lock
+            A thread lock to prevent multiple matplotlib plots from being opened simultaneously across different threads.
 
         Returns
         -------
@@ -38,6 +45,7 @@ class Conditions(threading.Thread):
         self.weather_alert = threading.Event()
         self.connection_alert = threading.Event()
         self.stop = threading.Event()
+        self.plot_lock = plot_lock
         # Threading events to set flags and interact between threads
         self.config_dict = config_reader.get_config()  # Global config dictionary
         self.weather_url = 'http://weather.cos.gmu.edu/Current_Monitor.htm'
@@ -258,10 +266,8 @@ class Conditions(threading.Thread):
             logging.warning('Could not save weather.com html due to a unicode error.')
 
         epoch_sec = time_utils.datetime_to_epoch_milli_converter(datetime.datetime.utcnow()) / 1000
-        esec_round = time_utils.rounddown_300(epoch_sec)
+        esec_round = int(time_utils.rounddown_300(epoch_sec) - 300)
         # Website radar images only update every 300 seconds
-        if abs(epoch_sec - esec_round) < 10:
-            time.sleep(10 - abs(epoch_sec - esec_round))
 
         coords = {0: '291:391:10', 1: '291:392:10', 2: '292:391:10', 3: '292:392:10'}
         # Radar map coordinates found by looking through html
@@ -291,13 +297,15 @@ class Conditions(threading.Thread):
                 colsum = [np.nansum(colors[:, 1][i]) for i in range(len(colors))]
                 uncolored_i = np.where(np.isclose(colsum, 0))[0]
                 percent_colored = (1 - colors[uncolored_i][0][0] / px) * 100
+                logging.debug('Rain percentage: {:.5f}'.format(percent_colored))
+                img.close()
                 if percent_colored >= self.config_dict.rain_percent_limit:
                     return True
                 else:
                     rain.append(1)
             else:
+                img.close()
                 continue
-            img.close()
         if sum(rain) >= 2:
             return True
         else:
@@ -317,9 +325,9 @@ class Conditions(threading.Thread):
 
         """
         satellite = self.config_dict.cloud_satellite
-        day = str(int(time_utils.days_of_year())).zfill(3)
+        day = int(time_utils.days_of_year())
         conus_band = 13
-        _time = datetime.datetime.now(datetime.timezone.utc)
+        _time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)
         year = _time.year
         time_round = time_utils.rounddown_300(_time.hour * 60 * 60 + _time.minute * 60 + _time.second)
         req = None
@@ -327,6 +335,16 @@ class Conditions(threading.Thread):
         for i in range(6):
             hour = int(time_round / (60 * 60))
             minute = int((time_round - hour * 60 * 60) / 60) - i
+            if minute < 0:
+                hour -= 1
+                minute += 60
+            if hour < 0:
+                day -= 1
+                hour += 24
+            if int(day) < 0:
+                year -= 1
+                day += 365
+            day = str(day).zfill(3)
             _time = '{0:02d}{1:02d}'.format(hour, minute)
             if (minute - 1) % 5 != 0:
                 continue
@@ -334,6 +352,7 @@ class Conditions(threading.Thread):
                 '{}_{}{}_{}_{}_conus.gif'.format(satellite, year, day, _time, conus_band)
             try:
                 req = s.get(url, headers={'User-Agent': self.config_dict.user_agent})
+                break
             except (urllib3.exceptions.MaxRetryError, urllib3.exceptions.HTTPError, urllib3.exceptions.TimeoutError,
                     urllib3.exceptions.InvalidHeader, requests.exceptions.ConnectionError, requests.exceptions.Timeout,
                     requests.exceptions.HTTPError):
@@ -355,8 +374,22 @@ class Conditions(threading.Thread):
         img_small = Image.fromarray(img_internal)
         px = img_small.size[0] * img_small.size[1]
         colors = img_small.getcolors()
-        clouds = [color for color in colors if color[1] > self.config_dict.cloud_saturation_limit]
-        percent_cover = sum([cloud[0] for cloud in clouds]) / px * 100
+        percent_cover = sum([(0, colorn)[colorp - self.config_dict.cloud_saturation_limit >= 0] for (colorn, colorp) in colors]) / px * 100
+        logging.debug('Cloud coverage (%): {:.5f}'.format(percent_cover))
+        if not isinstance(self.plot_lock, type(None)):
+            self.plot_lock.acquire()
+        else:
+            logging.warning('No thread lock is being utilized for plot drawing: plots may draw incorrectly!')
+        colornorm = mplc.Normalize(vmin=0, vmax=256)
+        fig, ax = plt.subplots()
+        plot = ax.imshow(img_internal, cmap=plt.get_cmap('PuOr'), norm=colornorm)
+        pos = ax.get_position()
+        cbar_ax = fig.add_axes([0.83, pos.y0, 0.025, pos.height])
+        cbar = fig.colorbar(plot, cax=cbar_ax)
+        ax.set_title('Percent Cover: {:.2f}%'.format(percent_cover))
+        plt.savefig(os.path.abspath(os.path.join(self.weather_directory, r'cloud-img-small.png')))
+        if not isinstance(self.plot_lock, type(None)):
+            self.plot_lock.release()
         img.close()
         img_small.close()
         if percent_cover >= self.config_dict.cloud_cover_limit:

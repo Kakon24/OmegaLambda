@@ -259,7 +259,7 @@ def get_local_sidereal_time(longitude: float, date: Optional[Union[str, datetime
     if not date.tzinfo:
         date = pytz.utc.localize(date)
     if date.tzinfo not in (pytz.UTC, pytz.utc, datetime.timezone.utc):
-        raise ValueError('Time must be in UTC!')
+        date = date.astimezone(pytz.UTC)
     jd = convert_to_jd_utc(date.replace(hour=0, minute=0, second=0, microsecond=0))
     ut_hours = fractional_hours_of_day(date)
 
@@ -415,10 +415,15 @@ def convert_to_bjd_tdb(jd, name, lat, lon, height, ra=None, dec=None):
     #             pmdec = toi_info['PM Dec (mas/yr)'].values[0]
 
     # Query SIMBAD for proper motion, parallax, and RV
-    simbad = Simbad()
-    simbad.add_votable_fields('ra(2;A;ICRS;J2000)', 'dec(2;D;ICRS;J2000)','pm', 'plx','parallax','rv_value')
-    simbad.remove_votable_fields('coordinates')
-    table = simbad.query_object(name)
+    try:
+        simbad = Simbad()
+        simbad.add_votable_fields('ra(2;A;ICRS;J2000)', 'dec(2;D;ICRS;J2000)','pm', 'plx','parallax','rv_value')
+        simbad.remove_votable_fields('coordinates')
+        table = simbad.query_object(name)
+    except (urllib3.exceptions.MaxRetryError, urllib3.exceptions.HTTPError, urllib3.exceptions.TimeoutError,
+            urllib3.exceptions.InvalidHeader, requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+            requests.exceptions.HTTPError, TimeoutError):
+        return None
     if not table:
         if not ra or not dec:
             return None

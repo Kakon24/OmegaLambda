@@ -29,7 +29,7 @@ def standard_parabola(x, a, b, c):
 
 class FocusProcedures(Hardware):
 
-    def __init__(self, focus_obj, camera_obj, conditions_obj):
+    def __init__(self, focus_obj, camera_obj, conditions_obj, plot_lock=None):
         """
         Initializes focusprocedures as a subclass of hardware.
 
@@ -41,6 +41,8 @@ class FocusProcedures(Hardware):
             From custom camera class.
         conditions_obj : CLASS INSTANCE OBJECT of Conditions
             From custom conditions class.
+        plot_lock : threading.Lock
+            Thread lock so as not to attempt multiple matplotlib plots at once.
 
         Returns
         -------
@@ -51,6 +53,7 @@ class FocusProcedures(Hardware):
         self.camera = camera_obj
         self.conditions = conditions_obj
         self.config_dict = config_reader.get_config()
+        self.plot_lock = plot_lock
         self.position_previous = None
         self.temp_previous = None
        
@@ -191,8 +194,7 @@ class FocusProcedures(Hardware):
         self.position_previous = self.focuser.position
         return
 
-    @staticmethod
-    def plot_focus_model(fwhm_values, position_values, peak_values):
+    def plot_focus_model(self, fwhm_values, position_values, peak_values):
         data = sorted(zip(position_values, fwhm_values, peak_values))
         # fwhm_deltas = np.diff(data[1], n=1)
         # peak_deltas = np.diff(data[2], n=1)
@@ -220,6 +222,10 @@ class FocusProcedures(Hardware):
                                bounds=([-np.inf, -np.inf, 1e-5], [np.inf, np.inf, np.inf]))
             xfit = np.linspace(med - 75, med + 75, 126)
             yfit = fit[2] * (xfit ** 2) + fit[1] * xfit + fit[0]
+            if not isinstance(self.plot_lock, type(None)):
+                self.plot_lock.acquire()
+            else:
+                logging.warning('No thread lock is being utilized for plot drawing: plots may draw incorrectly!')
             fig, ax = plt.subplots()
             ax.plot(x, y, 'bo', label='Raw data')
             ax.plot(xfit, yfit, 'r-', label='Parabolic fit')
@@ -234,6 +240,8 @@ class FocusProcedures(Hardware):
             target_path_2 = os.path.abspath(os.path.join(current_path, r'../../test/FocusData_{}.txt'.format(
                 datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))))
             plt.savefig(target_path)
+            if not isinstance(self.plot_lock, type(None)):
+                self.plot_lock.release()
             d = np.array([[xi, yi] for xi, yi in zip(x, y)])
             np.savetxt(target_path_2, d, delimiter=',', header='Position [steps], FWHM [px]', fmt=('%d', '%.5f'))
 
